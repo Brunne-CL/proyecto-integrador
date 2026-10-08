@@ -1,0 +1,94 @@
+name: CI/CD API REST
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Pruebas y cobertura
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+
+      - name: Ejecutar pruebas y mostrar cobertura
+        run: pytest
+
+  publish:
+    name: Publicar imagen en Docker Hub
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      image: ${{ steps.tag.outputs.image }}
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Autenticar en Docker Hub con PAT
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Definir repositorio de la imagen
+        id: tag
+        run: |
+          USER_LOWER=$(echo "${{ secrets.DOCKERHUB_USERNAME }}" | tr '[:upper:]' '[:lower:]')
+          echo "image=${USER_LOWER}/rest-api-cicd" >> "$GITHUB_OUTPUT"
+
+      - name: Compilar y publicar latest y el hash del commit
+        run: |
+          IMAGE="${{ steps.tag.outputs.image }}"
+          docker build -t "${IMAGE}:latest" -t "${IMAGE}:${{ github.sha }}" .
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${{ github.sha }}"
+
+  deploy:
+    name: Desplegar en EC2
+    runs-on: ubuntu-latest
+    needs: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Descargar la imagen nueva y reemplazar el contenedor
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          IMAGE: ${{ needs.publish.outputs.image }}:latest
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          command_timeout: 10m
+          envs: DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,IMAGE
+          script: |
+            set -eu
+            echo "$DOCKERHUB_TOKEN" | sudo docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+            sudo docker pull "$IMAGE"
+            sudo docker stop rest-api || true
+            sudo docker rm rest-api || true
+            sudo docker run -d --name rest-api --restart unless-stopped -p 80:80 "$IMAGE"
+            sudo docker logout
+            ok=0
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+              if sudo docker exec rest-api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:80/api/health')"; then
+                ok=1
+                break
+              fi
+              sleep 1
+            done
+            test "$ok" = 1
+            sudo docker exec rest-api python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:80/api/health').read().decode())"
