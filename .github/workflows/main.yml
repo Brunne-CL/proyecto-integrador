@@ -66,16 +66,16 @@ jobs:
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          IMAGE: ${{ needs.publish.outputs.image }}:latest
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script_stop: true
           command_timeout: 10m
-          envs: DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,IMAGE
+          envs: DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
           script: |
             set -eu
+            IMAGE="$(printf '%s' "$DOCKERHUB_USERNAME" | tr '[:upper:]' '[:lower:]')/rest-api-cicd:latest"
             echo "$DOCKERHUB_TOKEN" | sudo docker login -u "$DOCKERHUB_USERNAME" --password-stdin
             sudo docker pull "$IMAGE"
             sudo docker stop rest-api || true
